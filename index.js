@@ -19,7 +19,7 @@ const keys = Object.keys(process.env)
   .map(key => process.env[key]);
 
 if (keys.length === 0) {
-  console.error('No API keys found in environment variables. Please add keys as API_KEY_1, API_KEY_2, etc.');
+  console.error('No API keys found. Add keys as API_KEY_1, API_KEY_2, etc.');
 }
 
 let currentKeyIndex = 0;
@@ -40,21 +40,26 @@ const currentMonth = new Date().getMonth();
 if (currentMonth !== lastResetMonth) {
   usageCounts = keys.map(() => 0);
   lastResetMonth = currentMonth;
-  fs.writeFileSync('usage.json', JSON.stringify({ currentKeyIndex, usageCounts, lastResetMonth }), 'utf8');
+  try {
+    fs.writeFileSync('usage.json', JSON.stringify({ currentKeyIndex, usageCounts, lastResetMonth }), 'utf8');
+  } catch (error) {
+    console.error('Failed to write usage.json:', error.message);
+  }
 }
 
 app.post('/scrape', async (req, res) => {
-  const { query } = req.body;
-  if (!query) {
-    return res.status(400).json({ error: 'Please provide a URL to scrape' });
+  const { query, autoparse = false } = req.body; // Added autoparse support
+  if (!query || !query.match(/^https?:\/\/.+/)) {
+    return res.status(400).json({ error: 'Please provide a valid URL' });
   }
 
   // Find a key with available requests
   let keyToUse = null;
-  for (let i = currentKeyIndex; i < keys.length; i++) {
-    if (usageCounts[i] < 1000) {
-      keyToUse = keys[i];
-      currentKeyIndex = i;
+  for (let i = 0; i < keys.length; i++) {
+    const index = (currentKeyIndex + i) % keys.length; // Improved rotation
+    if (usageCounts[index] < 1000) {
+      keyToUse = keys[index];
+      currentKeyIndex = index;
       break;
     }
   }
@@ -63,46 +68,66 @@ app.post('/scrape', async (req, res) => {
   }
 
   try {
-    // Fetch with JavaScript rendering enabled
     const apiUrl = `http://api.scraperapi.com?api_key=${keyToUse}&url=${encodeURIComponent(query)}&render=true`;
-    const response = await fetch(apiUrl);
+    const response = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124',
+      },
+      timeout: 30000, // Added timeout
+    });
     if (!response.ok) {
-      throw new Error(`ScraperAPI error: ${response.statusText}`);
+      const errorText = await response.text();
+      if (response.status === 429) throw new Error('Rate limit exceeded');
+      if (response.status === 401 || response.status === 403) throw new Error('Invalid API key');
+      throw new Error(`ScraperAPI error: ${response.status} - ${errorText}`);
     }
     const html = await response.text();
     const $ = cheerio.load(html);
 
     // Extract structured data
-    const title = $('h1').first().text().trim() || $('title').text().trim() || 'No title';
-    const intro = $('p').filter((i, el) => $(el).text().trim().length > 50).first().text().trim() || 'No intro';
-    const sections = $('h2, h3').map((i, el) => $(el).text().trim()).get().filter(text => text);
+    let result = { rawHtml: html.slice(0, 2000) }; // Increased limit
+    const urlObj = new URL(query);
+    const hostname = urlObj.hostname;
+
+    result.title = $('h1').first().text().trim() || $('title').text().trim() || 'No title';
+    result.intro = $('p').filter((i, el) => $(el).text().trim().length > 50).first().text().trim() || 'No intro';
+    result.sections = $('h2, h3').map((i, el) => $(el).text().trim()).get().filter(text => text);
 
     // Domain-specific extraction
     let customData = {};
-    const urlObj = new URL(query);
-    if (urlObj.hostname.includes('wikipedia.org')) {
-      customData.intro = $('#mw-content-text .mw-parser-output > p:not(.mw-empty-elt)').first().text().trim() || intro;
+    if (hostname.includes('wikipedia.org')) {
+      customData.intro = $('#mw-content-text .mw-parser-output > p:not(.mw-empty-elt)').first().text().trim() || result.intro;
       customData.sections = $('#mw-content-text .mw-parser-output > h2').map((i, el) => $(el).text().trim()).get();
-    } else if (urlObj.hostname.includes('amazon')) {
-      customData.title = $('#productTitle').text().trim() || title;
+    } else if (hostname.includes('amazon')) {
+      customData.title = $('#productTitle').text().trim() || result.title;
       customData.description = $('#feature-bullets').text().trim() || $('#productDescription').text().trim() || 'No description';
     }
 
-    usageCounts[currentKeyIndex]++;
-    fs.writeFileSync('usage.json', JSON.stringify({ currentKeyIndex, usageCounts, lastResetMonth }), 'utf8');
+    // Autoparse additional data
+    if (autoparse) {
+      result.paragraphs = $('p').map((i, el) => $(el).text().trim()).get().filter(text => text.length > 20);
+      result.items = $('ul, ol').find('li').map((i, el) => $(el).text().trim()).get().filter(text => text);
+    }
 
-    res.json({
-      result: {
-        rawHtml: html.slice(0, 1000), // Limit for debugging
-        title: customData.title || title,
-        intro: customData.intro || intro,
-        sections: customData.sections || sections
-      }
-    });
+    result = { ...result, ...customData };
+
+    usageCounts[currentKeyIndex]++;
+    try {
+      fs.writeFileSync('usage.json', JSON.stringify({ currentKeyIndex, usageCounts, lastResetMonth }), 'utf8');
+    } catch (error) {
+      console.error('Failed to write usage.json:', error.message);
+    }
+
+    res.json({ result });
   } catch (error) {
     console.error('Scrape error:', error);
-    res.status(500).json({ error: `Failed to scrape: ${error.message}` });
+    const status = error.message.includes('Rate limit') ? 429 : error.message.includes('Invalid API key') ? 401 : 500;
+    res.status(status).json({ error: `Failed to scrape: ${error.message}` });
   }
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
 const PORT = process.env.PORT || 3000;
