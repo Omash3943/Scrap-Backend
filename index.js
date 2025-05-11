@@ -8,13 +8,13 @@ const app = express();
 
 // Enable CORS for your frontend domains
 app.use(cors({
-  origin: ['http://localhost:2435', 'https://josyvine.github.io/trio-chatbot'], // Local testing and chatbot's GitHub Pages URL
+  origin: ['http://localhost:2435', 'https://josyvine.github.io/trio-chatbot'],
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type']
 }));
 app.use(express.json());
 
-// Load API keys from environment variables (e.g., API_KEY_1, API_KEY_2)
+// Load API keys from environment variables
 const keys = Object.keys(process.env)
   .filter(key => key.startsWith('API_KEY_'))
   .sort((a, b) => parseInt(a.replace('API_KEY_', '')) - parseInt(b.replace('API_KEY_', '')))
@@ -29,7 +29,7 @@ let currentKeyIndex = 0;
 let usageCounts = keys.map(() => 0);
 let lastResetMonth = new Date().getMonth();
 
-// Load saved usage data from usage.json if it exists
+// Load saved usage data
 if (fs.existsSync('usage.json')) {
   const data = fs.readFileSync('usage.json', 'utf8');
   const parsed = JSON.parse(data);
@@ -50,16 +50,16 @@ if (currentMonth !== lastResetMonth) {
   }
 }
 
-// POST /scrape endpoint to handle scraping requests
+// POST /scrape endpoint
 app.post('/scrape', async (req, res) => {
   const { query, autoparse = false, render_js = false } = req.body;
 
-  // Validate the URL
+  // Validate URL
   if (!query || !query.match(/^https?:\/\/[^\s/$.?#].[^\s]*$/)) {
     return res.status(400).json({ error: 'Please provide a valid URL' });
   }
 
-  // Select an available API key (assuming a 1000-request limit per key)
+  // Select API key
   let keyToUse = null;
   for (let i = 0; i < keys.length; i++) {
     const index = (currentKeyIndex + i) % keys.length;
@@ -74,29 +74,41 @@ app.post('/scrape', async (req, res) => {
   }
 
   try {
-    // Construct ScraperAPI URL
-    const apiUrl = `http://api.scraperapi.com?api_key=${keyToUse}&url=${encodeURIComponent(query)}&render=${render_js}&autoparse=${autoparse}`;
+    // Adjust parameters for specific sites
+    const isWikipedia = query.includes('wikipedia.org');
+    const isAmazon = query.includes('amazon.');
+    const adjustedAutoparse = isWikipedia ? false : autoparse;
+    let apiUrl = `http://api.scraperapi.com?api_key=${keyToUse}&url=${encodeURIComponent(query)}&render=${render_js}&autoparse=${adjustedAutoparse}`;
+    if (isAmazon) {
+      apiUrl += '&premium=true&country_code=in';
+    }
+
+    // Fetch from ScraperAPI
     const response = await fetch(apiUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124',
       },
-      timeout: 45000, // 45-second timeout
+      timeout: 60000,
     });
 
-    // Handle response errors
+    // Handle errors
     if (!response.ok) {
       const errorText = await response.text();
+      console.error(`ScraperAPI failed: Status ${response.status}, Error: ${errorText}`);
       if (response.status === 429) throw new Error('Rate limit exceeded');
       if (response.status === 401 || response.status === 403) throw new Error('Invalid API key');
       throw new Error(`ScraperAPI error: ${response.status} - ${errorText}`);
     }
 
-    // Parse the response based on content type
+    // Parse response
     const contentType = response.headers.get('content-type');
     let data;
     let html;
     if (contentType.includes('application/json')) {
       data = await response.json();
+      if (data.parsed) {
+        result = { ...result, ...data.parsed }; // Use parsed data for Amazon
+      }
       html = data.html || '';
     } else {
       html = await response.text();
@@ -106,7 +118,7 @@ app.post('/scrape', async (req, res) => {
     // Parse HTML with Cheerio
     const $ = cheerio.load(html);
     let result = {
-      rawHtml: html.slice(0, 2000), // Limit raw HTML to prevent bloat
+      rawHtml: html.slice(0, 2000),
       title: $('title').text().trim() || 'No title',
       description: $('meta[name="description"]').attr('content')?.trim() || 'No description',
     };
@@ -115,13 +127,13 @@ app.post('/scrape', async (req, res) => {
     const unwantedSelectors = ['script', 'style', 'nav', 'footer', '.ad', '.advertisement', '[id*="ad"]', '[class*="ad"]'];
     unwantedSelectors.forEach(sel => $(sel).remove());
 
-    // Extract structured content from the main section
-    const mainContent = $('main, article, #content, .content, .main, body').first();
+    // Extract content
+    const mainContent = $('main, article, #content, .content, .main, #mw-content-text, body').first();
     if (mainContent.length) {
       result.paragraphs = mainContent.find('p')
         .map((i, el) => $(el).text().trim())
         .get()
-        .filter(text => text.length > 50); // Filter short paragraphs
+        .filter(text => text.length > 50);
       result.headings = mainContent.find('h1, h2, h3')
         .map((i, el) => $(el).text().trim())
         .get()
@@ -154,7 +166,7 @@ app.post('/scrape', async (req, res) => {
         .filter(table => table);
     }
 
-    // Update usage count and save
+    // Update usage count
     usageCounts[currentKeyIndex]++;
     try {
       fs.writeFileSync('usage.json', JSON.stringify({ currentKeyIndex, usageCounts, lastResetMonth }), 'utf8');
@@ -162,7 +174,7 @@ app.post('/scrape', async (req, res) => {
       console.error('Failed to write usage.json:', error.message);
     }
 
-    // Send the response
+    // Send response
     res.json({ result });
   } catch (error) {
     console.error('Scrape error:', error);
@@ -176,7 +188,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Start the server
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
