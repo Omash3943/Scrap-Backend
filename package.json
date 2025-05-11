@@ -1,7 +1,7 @@
 {
   "name": "scrap-backend",
   "version": "1.0.0",
-  "description": "ScraperAPI backend for Render",
+  "description": "Backend for ScraperAPI integration",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
