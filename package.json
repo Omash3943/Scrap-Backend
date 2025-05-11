@@ -1,15 +1,19 @@
 {
-  "name": "chatbot-backend",
+  "name": "ai-chat-bot",
   "version": "1.0.0",
-  "description": "Backend for chatbot scraping with ScraperAPI",
-  "main": "index.js",
+  "description": "AI Chat Bot with Wikidata Retrieval and Web Scraping",
+  "main": "index.html",
   "scripts": {
-    "start": "node index.js"
+    "start": "http-server -p 8080",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "express": "^4.17.1",
-    "node-fetch": "^2.6.1",
-    "cors": "^2.8.5",
-    "cheerio": "^1.0.0-rc.12"
-  }
+    "marked": "^4.0.0",
+    "@mozilla/readability": "^0.4.4"
+  },
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  },
+  "author": "Your Name",
+  "license": "MIT"
 }
