@@ -48,7 +48,7 @@ if (currentMonth !== lastResetMonth) {
 }
 
 app.post('/scrape', async (req, res) => {
-  const { query, autoparse = false } = req.body; // Added autoparse support
+  const { query, autoparse = false, render_js = false } = req.body; // Added render_js support
   if (!query || !query.match(/^https?:\/\/.+/)) {
     return res.status(400).json({ error: 'Please provide a valid URL' });
   }
@@ -56,7 +56,7 @@ app.post('/scrape', async (req, res) => {
   // Find a key with available requests
   let keyToUse = null;
   for (let i = 0; i < keys.length; i++) {
-    const index = (currentKeyIndex + i) % keys.length; // Improved rotation
+    const index = (currentKeyIndex + i) % keys.length;
     if (usageCounts[index] < 1000) {
       keyToUse = keys[index];
       currentKeyIndex = index;
@@ -68,12 +68,13 @@ app.post('/scrape', async (req, res) => {
   }
 
   try {
-    const apiUrl = `http://api.scraperapi.com?api_key=${keyToUse}&url=${encodeURIComponent(query)}&render=true`;
+    // Construct ScraperAPI URL with autoparse and render_js options
+    const apiUrl = `http://api.scraperapi.com?api_key=${keyToUse}&url=${encodeURIComponent(query)}&render=${render_js}&autoparse=${autoparse}`;
     const response = await fetch(apiUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124',
       },
-      timeout: 30000, // Added timeout
+      timeout: 30000,
     });
     if (!response.ok) {
       const errorText = await response.text();
@@ -81,36 +82,87 @@ app.post('/scrape', async (req, res) => {
       if (response.status === 401 || response.status === 403) throw new Error('Invalid API key');
       throw new Error(`ScraperAPI error: ${response.status} - ${errorText}`);
     }
-    const html = await response.text();
+    const data = await response.json(); // Handle JSON response for autoparse
+    let html = data.html || await response.text(); // Fallback to raw HTML
+
     const $ = cheerio.load(html);
 
-    // Extract structured data
-    let result = { rawHtml: html.slice(0, 2000) }; // Increased limit
-    const urlObj = new URL(query);
-    const hostname = urlObj.hostname;
+    // Initialize result object
+    let result = {
+      rawHtml: html.slice(0, 2000), // Limit raw HTML to prevent bloat
+      title: $('title').text().trim() || 'No title',
+      description: $('meta[name="description"]').attr('content')?.trim() || 'No description',
+    };
 
-    result.title = $('h1').first().text().trim() || $('title').text().trim() || 'No title';
-    result.intro = $('p').filter((i, el) => $(el).text().trim().length > 50).first().text().trim() || 'No intro';
-    result.sections = $('h2, h3').map((i, el) => $(el).text().trim()).get().filter(text => text);
+    // Remove unwanted elements for cleaner content
+    const unwantedSelectors = ['script', 'style', 'nav', 'footer', '.ad', '.advertisement', '[id*="ad"]', '[class*="ad"]'];
+    unwantedSelectors.forEach(sel => $(sel).remove());
+
+    // Extract main content
+    const mainContent = $('main, article, #content, .content, .main, body').first();
+    if (mainContent.length) {
+      // Paragraphs with minimum length
+      result.paragraphs = mainContent.find('p')
+        .map((i, el) => $(el).text().trim())
+        .get()
+        .filter(text => text.length > 50);
+
+      // Headings (h1, h2, h3)
+      result.headings = mainContent.find('h1, h2, h3')
+        .map((i, el) => $(el).text().trim())
+        .get()
+        .filter(text => text);
+
+      // Lists
+      result.items = mainContent.find('ul, ol')
+        .find('li')
+        .map((i, el) => $(el).text().trim())
+        .get()
+        .filter(text => text);
+
+      // Images with alt text
+      result.images = mainContent.find('img')
+        .map((i, el) => {
+          const alt = $(el).attr('alt') || 'Image';
+          const src = $(el).attr('src');
+          return src ? { alt, src } : null;
+        })
+        .get()
+        .filter(img => img);
+
+      // Tables
+      result.tables = mainContent.find('table')
+        .map((i, table) => {
+          const rows = $(table).find('tr')
+            .map((i, row) => $(row).find('td, th')
+              .map((i, cell) => $(cell).text().trim())
+              .get()
+              .join(' | ')
+            )
+            .get();
+          return rows.length ? rows.join('\n') : null;
+        })
+        .get()
+        .filter(table => table);
+    }
 
     // Domain-specific extraction
-    let customData = {};
+    const urlObj = new URL(query);
+    const hostname = urlObj.hostname;
     if (hostname.includes('wikipedia.org')) {
-      customData.intro = $('#mw-content-text .mw-parser-output > p:not(.mw-empty-elt)').first().text().trim() || result.intro;
-      customData.sections = $('#mw-content-text .mw-parser-output > h2').map((i, el) => $(el).text().trim()).get();
+      result.description = $('#mw-content-text .mw-parser-output > p:not(.mw-empty-elt)').first().text().trim() || result.description;
+      result.sections = $('#mw-content-text .mw-parser-output > h2').map((i, el) => $(el).text().trim()).get();
     } else if (hostname.includes('amazon')) {
-      customData.title = $('#productTitle').text().trim() || result.title;
-      customData.description = $('#feature-bullets').text().trim() || $('#productDescription').text().trim() || 'No description';
+      result.title = $('#productTitle').text().trim() || result.title;
+      result.description = $('#feature-bullets').text().trim() || $('#productDescription').text().trim() || result.description;
     }
 
-    // Autoparse additional data
-    if (autoparse) {
-      result.paragraphs = $('p').map((i, el) => $(el).text().trim()).get().filter(text => text.length > 20);
-      result.items = $('ul, ol').find('li').map((i, el) => $(el).text().trim()).get().filter(text => text);
+    // Handle autoparse response from ScraperAPI
+    if (autoparse && data.parsed) {
+      result.parsed = data.parsed; // Include autoparse data
     }
 
-    result = { ...result, ...customData };
-
+    // Increment usage count and save
     usageCounts[currentKeyIndex]++;
     try {
       fs.writeFileSync('usage.json', JSON.stringify({ currentKeyIndex, usageCounts, lastResetMonth }), 'utf8');
