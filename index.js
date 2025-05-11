@@ -8,7 +8,7 @@ const app = express();
 
 // Enable CORS for your frontend domains
 app.use(cors({
-  origin: ['http://localhost:2435', 'https://your-frontend-url.com'], // Replace with your actual frontend URL
+  origin: ['http://localhost:2435', 'https://josyvine.github.io/trio-chatbot'], // Local testing and chatbot's GitHub Pages URL
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type']
 }));
