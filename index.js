@@ -84,6 +84,57 @@ async function scrapeWithScraperAPI(url, autoparse = true, render_js = true) {
     }
 }
 
+// Spider scraping with ScraperAPI for search results or listings
+async function scrapeSpiderWithScraperAPI(url, query, autoparse = true, render_js = true) {
+    try {
+        const apiUrl = `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}&autoparse=${autoparse}&render_js=${render_js}`;
+        const response = await fetch(apiUrl, { timeout: 15000 });
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        if (data.error) {
+            throw new Error(data.error);
+        }
+
+        let results = [];
+        if (data.organic_results) {
+            // For search engines
+            results = data.organic_results.map(result => ({
+                headline: result.title,
+                snippet: result.snippet,
+                link: result.link
+            }));
+        } else if (data.products) {
+            // For e-commerce sites
+            results = [{
+                products: data.products.map(product => ({
+                    name: product.name,
+                    price: product.price,
+                    image: product.image,
+                    link: product.link
+                }))
+            }];
+        } else {
+            // Fallback: extract paragraphs or other content
+            const $ = cheerio.load(data.html);
+            const paragraphs = $('p')
+                .map((i, el) => $(el).text().trim())
+                .get()
+                .filter(p => p.length > 20);
+            results = paragraphs.map(p => ({ snippet: p }));
+        }
+
+        // Extract images if available
+        const images = data.images ? data.images.map(img => ({ src: img.src, alt: img.alt || 'Image' })) : [];
+
+        return { results, images };
+    } catch (error) {
+        console.error(`[scrapeSpiderWithScraperAPI] Error scraping ${url}: ${error.message}`);
+        throw new Error(`ScraperAPI spider scrape failed: ${error.message}`);
+    }
+}
+
 // Scrape endpoint for single URL (handles both DeepSearch modes)
 app.post('/scrape', async (req, res) => {
     const { query, autoparse = true, render_js = true, deepSearch = false } = req.body;
@@ -113,6 +164,38 @@ app.post('/scrape', async (req, res) => {
         res.json({ result });
     } catch (error) {
         console.error(`[scrape] Failed for ${query}: ${error.message}`);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Spider scrape endpoint for handling search results or listings
+app.post('/scrape-spider', async (req, res) => {
+    const { query, url, spider, autoparse = true, render_js = true } = req.body;
+
+    if (!url || !query) {
+        return res.status(400).json({ error: 'Both "url" and "query" are required' });
+    }
+
+    try {
+        new URL(url);
+    } catch (_) {
+        return res.status(400).json({ error: 'Invalid URL format' });
+    }
+
+    console.log(`[scrape-spider] Processing request for URL: ${url}, query: ${query}`);
+
+    try {
+        let result;
+        if (SCRAPER_API_KEY) {
+            console.log('[scrape-spider] Using ScraperAPI');
+            result = await scrapeSpiderWithScraperAPI(url, query, autoparse, render_js);
+        } else {
+            console.log('[scrape-spider] ScraperAPI key missing');
+            throw new Error('ScraperAPI key is required for spider scraping');
+        }
+        res.json({ results: result.results, images: result.images });
+    } catch (error) {
+        console.error(`[scrape-spider] Failed for ${url}: ${error.message}`);
         res.status(500).json({ error: error.message });
     }
 });
