@@ -7,7 +7,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 const SCRAPER_API_KEY = process.env.SCRAPER_API_KEY || '';
 
-app.use(cors({ origin: '*' })); // Allow all origins for chatbot
+app.use(cors({ origin: '*' })); // Allow chatbot requests from any domain
 app.use(express.json({ limit: '10mb' })); // Handle larger payloads
 
 // Health check endpoint
@@ -15,10 +15,13 @@ app.get('/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Direct scraping with fetch and cheerio
+// Direct scraping with fetch and cheerio (fallback)
 async function scrapeWithFetch(url) {
     try {
-        const response = await fetch(url, { timeout: 10000 });
+        const response = await fetch(url, {
+            timeout: 10000,
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ChatbotScraper/1.0)' }
+        });
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -35,7 +38,7 @@ async function scrapeWithFetch(url) {
             .map((i, el) => {
                 const src = $(el).attr('src') || '';
                 const alt = $(el).attr('alt') || 'Image';
-                return src ? { src, alt } : null;
+                return src ? { src: new URL(src, url).href, alt } : null; // Resolve relative URLs
             })
             .get()
             .filter(img => img !== null);
@@ -52,7 +55,7 @@ async function scrapeWithFetch(url) {
     }
 }
 
-// ScraperAPI integration for single URL
+// ScraperAPI integration (primary for #queries)
 async function scrapeWithScraperAPI(url, autoparse = true, render_js = true) {
     try {
         const apiUrl = `http://api.scraperapi.com?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(url)}&autoparse=${autoparse}&render_js=${render_js}`;
@@ -69,7 +72,7 @@ async function scrapeWithScraperAPI(url, autoparse = true, render_js = true) {
         return {
             title: data.title || 'Untitled',
             description: data.description || '',
-            paragraphs: data.paragraphs || [],
+            paragraphs: (data.paragraphs || []).filter(p => p.length > 20),
             images: (data.images || []).map(img => ({
                 src: img.src || '',
                 alt: img.alt || 'Image'
@@ -81,15 +84,22 @@ async function scrapeWithScraperAPI(url, autoparse = true, render_js = true) {
     }
 }
 
-// Scrape endpoint for single URL
+// Scrape endpoint for single URL (handles both DeepSearch modes)
 app.post('/scrape', async (req, res) => {
-    const { query, autoparse = true, render_js = true } = req.body;
+    const { query, autoparse = true, render_js = true, deepSearch = false } = req.body;
 
     if (!query || typeof query !== 'string' || !query.trim()) {
         return res.status(400).json({ error: 'A valid URL is required in the "query" field' });
     }
 
-    console.log(`[scrape] Processing request for URL: ${query}`);
+    try {
+        // Validate URL format
+        new URL(query);
+    } catch (_) {
+        return res.status(400).json({ error: 'Invalid URL format' });
+    }
+
+    console.log(`[scrape] Processing request for URL: ${query} (DeepSearch: ${deepSearch})`);
 
     try {
         let result;
@@ -97,48 +107,13 @@ app.post('/scrape', async (req, res) => {
             console.log('[scrape] Using ScraperAPI');
             result = await scrapeWithScraperAPI(query, autoparse, render_js);
         } else {
-            console.log('[scrape] Using direct fetch');
+            console.log('[scrape] Using direct fetch (fallback)');
             result = await scrapeWithFetch(query);
         }
         res.json({ result });
     } catch (error) {
         console.error(`[scrape] Failed for ${query}: ${error.message}`);
         res.status(500).json({ error: error.message });
-    }
-});
-
-// New endpoint for #queries to handle multiple URLs
-app.post('/scrape-multi', async (req, res) => {
-    const { queries, autoparse = true, render_js = true } = req.body;
-
-    if (!Array.isArray(queries) || queries.length === 0 || queries.some(q => !q || typeof q !== 'string' || !q.trim())) {
-        return res.status(400).json({ error: 'An array of valid URLs is required in the "queries" field' });
-    }
-
-    console.log(`[scrape-multi] Processing ${queries.length} URLs: ${queries.join(', ')}`);
-
-    try {
-        const results = await Promise.all(queries.map(async (query) => {
-            try {
-                let result;
-                if (SCRAPER_API_KEY) {
-                    console.log(`[scrape-multi] Using ScraperAPI for ${query}`);
-                    result = await scrapeWithScraperAPI(query, autoparse, render_js);
-                } else {
-                    console.log(`[scrape-multi] Using direct fetch for ${query}`);
-                    result = await scrapeWithFetch(query);
-                }
-                return { url: query, result };
-            } catch (error) {
-                console.error(`[scrape-multi] Failed for ${query}: ${error.message}`);
-                return { url: query, error: error.message };
-            }
-        }));
-
-        res.json({ results });
-    } catch (error) {
-        console.error(`[scrape-multi] Unexpected error: ${error.message}`);
-        res.status(500).json({ error: 'Failed to process multiple URLs' });
     }
 });
 
